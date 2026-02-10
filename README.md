@@ -2,6 +2,102 @@
 
 An AI-powered code review tool that analyzes Python codebases for documentation gaps, style issues, algorithm improvements, security vulnerabilities, and maintainability concerns.
 
+## Bot vs Agent Mode
+
+This tool has two modes:
+
+| | Bot Mode (`code_reviewer.py`) | Agent Mode (`agent_reviewer.py`) |
+|---|---|---|
+| **Workflow** | Linear: fetch → review → post | Dynamic: observe → reason → act → iterate |
+| **Decision Making** | None - follows script | Reasons about what to focus on |
+| **Context** | Reviews files in isolation | Fetches related files for context |
+| **Self-Correction** | None | Critiques and filters its own findings |
+| **Speed** | Faster, cheaper | Slower, more thorough |
+| **Best For** | Quick checks, CI/CD | Complex PRs, thorough reviews |
+
+## Quick Start
+
+### Bot Mode (Fast, Simple)
+```bash
+# Review a PR
+python code_reviewer.py --github owner/repo --pr 123
+
+# Review local files
+python code_reviewer.py src/
+```
+
+### Agent Mode (Thorough, Intelligent)
+```bash
+# Let the agent reason about the PR
+python agent_reviewer.py --github owner/repo --pr 123
+
+# Verbose mode to see the agent's reasoning
+python agent_reviewer.py --github owner/repo --pr 123 -v
+```
+
+## What the Agent Does Differently
+
+The agent follows an **observe → reason → act → iterate** loop:
+
+```
+1. OBSERVE: Analyze PR context (title, description, file types, size)
+   💭 "This PR adds authentication code and touches 3 files..."
+
+2. REASON: Decide review strategy
+   💭 "Security should be the focus. Let me also fetch the base User class..."
+
+3. ACT: Fetch context, perform focused review
+   🔧 Fetching related files for context
+   🔧 Reviewing with focus on: security, error_handling
+
+4. ITERATE: Self-critique findings
+   💭 "Finding #3 is too pedantic, removing it..."
+
+5. POST: Final review with summary
+   ✅ Posted 4 high-quality findings
+```
+
+### Example Agent Session
+
+```
+$ python agent_reviewer.py --github mcsimien/myrepo --pr 42 -v
+
+============================================================
+🤖 Agentic Code Review - Starting
+============================================================
+
+📍 Iteration 1
+  🔧 Executing: analyze_pr_context
+  💭 This PR adds a new payment processing module. Security is critical.
+
+📍 Iteration 2
+  🔧 Executing: fetch_changed_files
+  🔧 Executing: fetch_related_files
+     Input: {"file_paths": ["src/models/user.py"], "reason": "Need to understand User model for auth check"}
+
+📍 Iteration 3
+  🔧 Executing: review_code
+     Input: {"files": ["src/payment.py"], "focus_areas": ["security", "error_handling"]}
+
+📍 Iteration 4
+  🔧 Executing: self_critique
+  💭 Removed 2 low-value findings about variable naming
+
+📍 Iteration 5
+  🔧 Executing: post_review
+
+✅ Review posted successfully!
+
+============================================================
+📊 Agent Summary
+============================================================
+Iterations: 5
+Files reviewed: 2
+Related files fetched: 1
+Final findings: 4
+Review posted: True
+```
+
 ## Quick Start
 
 ```bash
