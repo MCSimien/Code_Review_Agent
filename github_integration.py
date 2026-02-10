@@ -298,6 +298,75 @@ class GitHubClient:
     def get_open_prs(self, state: str = "open") -> list[dict]:
         """Get list of pull requests."""
         return self._request("GET", f"/pulls?state={state}&sort=updated&direction=desc")
+    
+    def get_pr_reviews(self) -> list[dict]:
+        """Get all reviews on a PR."""
+        return self._request("GET", f"/pulls/{self.config.pr_number}/reviews")
+    
+    def get_pr_comments(self) -> list[dict]:
+        """Get all issue comments on a PR."""
+        return self._request("GET", f"/issues/{self.config.pr_number}/comments")
+    
+    def has_existing_review(self, bot_indicators: list[str] = None) -> dict:
+        """
+        Check if we've already reviewed this PR at the current head commit.
+        
+        Args:
+            bot_indicators: List of strings to identify our bot's comments
+                           (e.g., ["Code Review Agent", "🤖"])
+        
+        Returns:
+            dict with 'has_review', 'review_sha', 'review_date' keys
+        """
+        if bot_indicators is None:
+            bot_indicators = ["Code Review Agent", "🤖 Code Review", "🤖 Agentic Code Review"]
+        
+        # Get current PR head SHA
+        pr_info = self.get_pr_info()
+        current_sha = pr_info["head"]["sha"]
+        
+        # Check PR reviews
+        try:
+            reviews = self.get_pr_reviews()
+            for review in reviews:
+                body = review.get("body", "") or ""
+                # Check if this looks like our review
+                if any(indicator in body for indicator in bot_indicators):
+                    # Check if it was made at the current commit
+                    review_sha = review.get("commit_id", "")
+                    if review_sha == current_sha:
+                        return {
+                            "has_review": True,
+                            "review_sha": review_sha,
+                            "review_date": review.get("submitted_at"),
+                            "source": "review"
+                        }
+        except Exception:
+            pass
+        
+        # Also check issue comments (fallback posting method)
+        try:
+            comments = self.get_pr_comments()
+            for comment in comments:
+                body = comment.get("body", "") or ""
+                if any(indicator in body for indicator in bot_indicators):
+                    # For comments, we can't easily check the SHA, so check recent
+                    # If comment exists and PR hasn't been updated since, skip
+                    comment_date = comment.get("created_at", "")
+                    pr_updated = pr_info.get("updated_at", "")
+                    
+                    # If comment was made after or near the last update, consider it reviewed
+                    if comment_date >= pr_updated:
+                        return {
+                            "has_review": True,
+                            "review_sha": current_sha,
+                            "review_date": comment_date,
+                            "source": "comment"
+                        }
+        except Exception:
+            pass
+        
+        return {"has_review": False}
 
 
 def format_review_body(results: list, summary_only: bool = False) -> str:
@@ -419,7 +488,8 @@ def build_inline_comments(results: list, diff_positions: dict[str, dict[int, int
 
 
 def post_review_to_github(results: list, config: GitHubConfig, 
-                          inline_comments: bool = True) -> dict:
+                          inline_comments: bool = True,
+                          skip_if_reviewed: bool = True) -> dict:
     """
     Post code review results to a GitHub PR.
     
@@ -427,11 +497,23 @@ def post_review_to_github(results: list, config: GitHubConfig,
         results: List of ReviewResult objects
         config: GitHub configuration
         inline_comments: If True, post inline comments on specific lines
+        skip_if_reviewed: If True, check if we've already reviewed and skip if so
         
     Returns:
         API response from GitHub
     """
     client = GitHubClient(config)
+    
+    # Check if we've already reviewed this PR at this commit
+    if skip_if_reviewed:
+        existing = client.has_existing_review()
+        if existing.get("has_review"):
+            return {
+                "success": True, 
+                "skipped": True, 
+                "reason": "Already reviewed at this commit",
+                "existing_review": existing
+            }
     
     # Get PR info and changed files
     pr_files = client.get_pr_files()

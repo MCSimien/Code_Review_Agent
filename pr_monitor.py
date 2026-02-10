@@ -163,7 +163,8 @@ def review_pr_agent(repo: str, pr_number: int, verbose: bool = False) -> dict:
             print(f"  PR #{pr_number}: {pr_info['title']}")
             print(f"  🤖 Running agent mode...")
         
-        state = run_agent(client, verbose=verbose)
+        # Note: force=False since we already checked has_existing_review in check_repo_for_prs
+        state = run_agent(client, verbose=verbose, force=False)
         
         return {
             "success": state.review_posted,
@@ -213,9 +214,26 @@ def check_repo_for_prs(repo: str, state: ReviewState, use_agent: bool = False,
             head_sha = pr["head"]["sha"]
             title = pr["title"]
             
+            # Check 1: Local state file
             if state.was_reviewed(repo, pr_number, head_sha):
                 if verbose:
-                    print(f"  PR #{pr_number}: Already reviewed at {head_sha[:8]}, skipping")
+                    print(f"  PR #{pr_number}: Already reviewed (local state), skipping")
+                continue
+            
+            # Check 2: Verify with GitHub API that we haven't already commented
+            pr_config = get_github_config(repo, pr_number)
+            pr_client = GitHubClient(pr_config)
+            
+            existing_review = pr_client.has_existing_review()
+            if existing_review.get("has_review"):
+                if verbose:
+                    print(f"  PR #{pr_number}: Already reviewed on GitHub at {head_sha[:8]}, skipping")
+                # Update local state to match
+                state.mark_reviewed(
+                    repo, pr_number, head_sha,
+                    success=True,
+                    mode="agent" if use_agent else "bot"
+                )
                 continue
             
             print(f"\n[{repo}] Reviewing PR #{pr_number}: {title}")
