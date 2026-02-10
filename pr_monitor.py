@@ -102,7 +102,7 @@ class ReviewState:
         self._save()
 
 
-def review_pr_bot(repo: str, pr_number: int, verbose: bool = False) -> dict:
+def review_pr_bot(repo: str, pr_number: int, verbose: bool = False, force: bool = False) -> dict:
     """
     Review a PR using bot mode (fast, linear).
     """
@@ -133,7 +133,12 @@ def review_pr_bot(repo: str, pr_number: int, verbose: bool = False) -> dict:
             result = review_with_claude(file_info["content"], rules, file_info["filename"])
             all_results.append(result)
         
-        post_result = post_review_to_github(all_results, config, inline_comments=True)
+        post_result = post_review_to_github(all_results, config, inline_comments=True,
+                                            skip_if_reviewed=not force)
+        
+        if post_result.get("skipped"):
+            return {"success": True, "skipped": True, "findings_count": 0, "mode": "bot"}
+        
         total_findings = sum(len(r.findings) for r in all_results)
         
         return {
@@ -147,7 +152,7 @@ def review_pr_bot(repo: str, pr_number: int, verbose: bool = False) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def review_pr_agent(repo: str, pr_number: int, verbose: bool = False) -> dict:
+def review_pr_agent(repo: str, pr_number: int, verbose: bool = False, force: bool = False) -> dict:
     """
     Review a PR using agent mode (thorough, reasoning).
     """
@@ -163,8 +168,7 @@ def review_pr_agent(repo: str, pr_number: int, verbose: bool = False) -> dict:
             print(f"  PR #{pr_number}: {pr_info['title']}")
             print(f"  🤖 Running agent mode...")
         
-        # Note: force=False since we already checked has_existing_review in check_repo_for_prs
-        state = run_agent(client, verbose=verbose, force=False)
+        state = run_agent(client, verbose=verbose, force=force)
         
         return {
             "success": state.review_posted,
@@ -177,18 +181,19 @@ def review_pr_agent(repo: str, pr_number: int, verbose: bool = False) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def review_pr(repo: str, pr_number: int, use_agent: bool = False, verbose: bool = False) -> dict:
+def review_pr(repo: str, pr_number: int, use_agent: bool = False, 
+              verbose: bool = False, force: bool = False) -> dict:
     """
     Review a single PR.
     """
     if use_agent:
-        return review_pr_agent(repo, pr_number, verbose)
+        return review_pr_agent(repo, pr_number, verbose, force)
     else:
-        return review_pr_bot(repo, pr_number, verbose)
+        return review_pr_bot(repo, pr_number, verbose, force)
 
 
 def check_repo_for_prs(repo: str, state: ReviewState, use_agent: bool = False, 
-                       verbose: bool = False) -> int:
+                       verbose: bool = False, force: bool = False) -> int:
     """
     Check a repository for open PRs and review any new ones.
     
@@ -214,31 +219,33 @@ def check_repo_for_prs(repo: str, state: ReviewState, use_agent: bool = False,
             head_sha = pr["head"]["sha"]
             title = pr["title"]
             
-            # Check 1: Local state file
-            if state.was_reviewed(repo, pr_number, head_sha):
-                if verbose:
-                    print(f"  PR #{pr_number}: Already reviewed (local state), skipping")
-                continue
-            
-            # Check 2: Verify with GitHub API that we haven't already commented
-            pr_config = get_github_config(repo, pr_number)
-            pr_client = GitHubClient(pr_config)
-            
-            existing_review = pr_client.has_existing_review()
-            if existing_review.get("has_review"):
-                if verbose:
-                    print(f"  PR #{pr_number}: Already reviewed on GitHub at {head_sha[:8]}, skipping")
-                # Update local state to match
-                state.mark_reviewed(
-                    repo, pr_number, head_sha,
-                    success=True,
-                    mode="agent" if use_agent else "bot"
-                )
-                continue
+            # Skip checks if force is enabled
+            if not force:
+                # Check 1: Local state file
+                if state.was_reviewed(repo, pr_number, head_sha):
+                    if verbose:
+                        print(f"  PR #{pr_number}: Already reviewed (local state), skipping")
+                    continue
+                
+                # Check 2: Verify with GitHub API that we haven't already commented
+                pr_config = get_github_config(repo, pr_number)
+                pr_client = GitHubClient(pr_config)
+                
+                existing_review = pr_client.has_existing_review()
+                if existing_review.get("has_review"):
+                    if verbose:
+                        print(f"  PR #{pr_number}: Already reviewed on GitHub at {head_sha[:8]}, skipping")
+                    # Update local state to match
+                    state.mark_reviewed(
+                        repo, pr_number, head_sha,
+                        success=True,
+                        mode="agent" if use_agent else "bot"
+                    )
+                    continue
             
             print(f"\n[{repo}] Reviewing PR #{pr_number}: {title}")
             
-            result = review_pr(repo, pr_number, use_agent=use_agent, verbose=verbose)
+            result = review_pr(repo, pr_number, use_agent=use_agent, verbose=verbose, force=force)
             
             state.mark_reviewed(
                 repo, pr_number, head_sha,
@@ -261,7 +268,7 @@ def check_repo_for_prs(repo: str, state: ReviewState, use_agent: bool = False,
 
 
 def run_monitor(repos: list[str], interval: int = 300, once: bool = False, 
-                use_agent: bool = False, verbose: bool = False):
+                use_agent: bool = False, verbose: bool = False, force: bool = False):
     """
     Main monitoring loop.
     """
@@ -273,13 +280,15 @@ def run_monitor(repos: list[str], interval: int = 300, once: bool = False,
     print("=" * 60)
     print(f"Monitoring {len(repos)} repo(s): {', '.join(repos)}")
     print(f"Check interval: {interval} seconds")
+    print(f"Force re-review: {force}")
     print(f"State file: {state.state_file}")
     print("=" * 60)
     
     if once:
         total_reviewed = 0
         for repo in repos:
-            total_reviewed += check_repo_for_prs(repo, state, use_agent=use_agent, verbose=verbose)
+            total_reviewed += check_repo_for_prs(repo, state, use_agent=use_agent, 
+                                                  verbose=verbose, force=force)
         
         print(f"\n{'=' * 60}")
         print(f"Reviewed {total_reviewed} PR(s)")
@@ -294,7 +303,8 @@ def run_monitor(repos: list[str], interval: int = 300, once: bool = False,
             
             total_reviewed = 0
             for repo in repos:
-                total_reviewed += check_repo_for_prs(repo, state, use_agent=use_agent, verbose=verbose)
+                total_reviewed += check_repo_for_prs(repo, state, use_agent=use_agent, 
+                                                      verbose=verbose, force=force)
             
             if total_reviewed > 0:
                 print(f"\nReviewed {total_reviewed} PR(s) this cycle")
@@ -343,6 +353,8 @@ Examples:
                         help="Use agent mode for thorough, reasoning-based reviews")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show detailed output")
+    parser.add_argument("--force", "-f", action="store_true",
+                        help="Review PRs even if already reviewed")
     parser.add_argument("--clear-state", action="store_true",
                         help="Clear review history and re-review all PRs")
     
@@ -381,7 +393,8 @@ Examples:
         interval=args.interval,
         once=args.once,
         use_agent=args.agent,
-        verbose=args.verbose
+        verbose=args.verbose,
+        force=args.force
     )
 
 

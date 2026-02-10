@@ -442,6 +442,16 @@ Return a JSON object:
         findings = input.get("findings", self.state.findings)
         recommendation = input.get("recommendation", "comment")
         
+        # Check if already reviewed first
+        existing = self.client.has_existing_review()
+        if existing.get("has_review"):
+            self.state.add_reasoning("PR already has a review at this commit, skipping")
+            return json.dumps({
+                "success": True,
+                "skipped": True,
+                "reason": "Already reviewed at this commit"
+            }, indent=2)
+        
         # Convert findings to ReviewResult format
         review_results = []
         files_findings = {}
@@ -466,17 +476,19 @@ Return a JSON object:
                 summary=summary
             ))
         
-        # Post to GitHub
+        # Post to GitHub (skip the double-check since we just did it)
         result = post_review_to_github(
             review_results,
             self.client.config,
-            inline_comments=True
+            inline_comments=True,
+            skip_if_reviewed=False  # Already checked above
         )
         
-        self.state.review_posted = True
+        self.state.review_posted = result.get("success", False) and not result.get("skipped", False)
         
         return json.dumps({
             "success": result.get("success", False),
+            "skipped": result.get("skipped", False),
             "inline_comments": result.get("inline_comments", 0),
             "summary": summary,
             "findings_count": len(findings)
@@ -493,7 +505,7 @@ Return a JSON object:
 # Agent Loop
 # =============================================================================
 
-def run_agent(github_client: GitHubClient, verbose: bool = False) -> AgentState:
+def run_agent(github_client: GitHubClient, verbose: bool = False, force: bool = False) -> AgentState:
     """
     Run the agentic review loop.
     
@@ -504,12 +516,32 @@ def run_agent(github_client: GitHubClient, verbose: bool = False) -> AgentState:
     4. Perform the review
     5. Self-critique and refine
     6. Post the final review
+    
+    Args:
+        github_client: GitHub API client
+        verbose: Show detailed output
+        force: Review even if already reviewed at this commit
     """
     
     if not HAS_ANTHROPIC:
         raise RuntimeError("Anthropic API required for agentic mode")
     
     state = AgentState()
+    
+    # Early check: has this PR already been reviewed?
+    if not force:
+        existing_review = github_client.has_existing_review()
+        if existing_review.get("has_review"):
+            print("\n" + "=" * 60)
+            print("🤖 Agentic Code Review")
+            print("=" * 60)
+            print(f"\n⏭️  PR already reviewed at commit {existing_review.get('review_sha', 'unknown')[:8]}")
+            print(f"   Review date: {existing_review.get('review_date', 'unknown')}")
+            print("   Skipping to avoid duplicate comments.")
+            print("   (Push new commits to trigger a new review, or use --force)")
+            state.review_posted = True  # Mark as "done" even though we skipped
+            return state
+    
     executor = AgentToolExecutor(github_client, state, verbose=verbose)
     client = anthropic.Anthropic()
     
@@ -652,6 +684,8 @@ Examples:
                         help="Show detailed reasoning")
     parser.add_argument("--dry-run", action="store_true",
                         help="Don't post to GitHub, just show what would be posted")
+    parser.add_argument("--force", "-f", action="store_true",
+                        help="Review even if already reviewed at this commit")
     
     args = parser.parse_args()
     
@@ -666,7 +700,7 @@ Examples:
     
     # Run the agent
     try:
-        state = run_agent(client, verbose=args.verbose)
+        state = run_agent(client, verbose=args.verbose, force=args.force)
         
         if not state.review_posted:
             print("\n⚠️  Review was not posted (agent may have encountered an issue)")

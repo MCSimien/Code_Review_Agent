@@ -408,6 +408,8 @@ Examples:
                               help="GitHub token (or set GITHUB_TOKEN env var)")
     github_group.add_argument("--no-inline", action="store_true",
                               help="Don't post inline comments, only summary")
+    github_group.add_argument("--force", action="store_true",
+                              help="Post review even if already reviewed")
     
     args = parser.parse_args()
     
@@ -535,10 +537,14 @@ Examples:
             result = post_review_to_github(
                 all_results, 
                 config, 
-                inline_comments=not args.no_inline
+                inline_comments=not args.no_inline,
+                skip_if_reviewed=not args.force
             )
             
-            if result["success"]:
+            if result.get("skipped"):
+                print(f"⏭️  Skipped: {result.get('reason', 'Already reviewed')}")
+                print("   (Use --force to post anyway)")
+            elif result["success"]:
                 print(f"✓ Review posted successfully!")
                 if result.get("inline_comments", 0) > 0:
                     print(f"  Posted {result['inline_comments']} inline comment(s)")
