@@ -1,0 +1,48 @@
+# Code Review Agent - Rules Configuration
+# Customize these rules to match your team's coding standards
+
+documentation:
+  enabled: true
+  require_docstrings: true
+  require_type_hints: true
+  docstring_style: google  # google, numpy, sphinx
+
+style:
+  enabled: true
+  max_line_length: 100
+  max_function_length: 50  # lines
+  max_file_length: 500     # lines
+  max_complexity: 10       # cyclomatic complexity
+  naming_convention: snake_case  # snake_case, camelCase
+
+algorithms:
+  enabled: true
+  flag_nested_loops: true
+  max_nesting_depth: 4
+  suggest_builtins: true   # suggest map/filter/comprehensions
+  flag_inefficient_patterns: true
+
+security:
+  enabled: true
+  check_hardcoded_secrets: true
+  check_sql_injection: true
+  check_command_injection: true
+  check_path_traversal: true
+  check_unsafe_deserialization: true
+
+maintainability:
+  enabled: true
+  max_parameters: 5
+  max_return_statements: 4
+  flag_global_state: true
+  flag_magic_numbers: true
+  require_constants: true
+
+# Custom rules - add your own patterns here
+custom:
+  enabled: false
+  patterns:
+    # Example: flag deprecated function usage
+    # - pattern: "from deprecated_module import"
+    #   message: "deprecated_module is deprecated, use new_module instead"
+    #   severity: warning

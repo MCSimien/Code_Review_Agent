@@ -1,0 +1,12 @@
+# Code Review Agent - Dependencies
+
+# Required
+pyyaml>=6.0
+
+# Optional - for Claude API integration
+# anthropic>=0.40.0
+
+# Development
+# pytest>=8.0
+# black>=24.0
+# mypy>=1.0

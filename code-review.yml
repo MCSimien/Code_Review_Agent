@@ -1,0 +1,72 @@
+# .github/workflows/code-review.yml
+# 
+# Automated code review on pull requests using Claude AI
+#
+# Setup:
+# 1. Add ANTHROPIC_API_KEY to repository secrets
+# 
+# Authentication (choose one):
+#   Option A - Personal Token: Add GITHUB_TOKEN (uses your username)
+#   Option B - GitHub App: Add GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, 
+#              GITHUB_APP_INSTALLATION_ID (shows as "YourApp[bot]")
+#
+# 3. Copy this file to .github/workflows/code-review.yml
+
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.py'  # Only run on Python file changes
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # Required to post review comments
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for diff comparison
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install anthropic pyyaml cryptography
+      
+      - name: Get changed Python files
+        id: changed-files
+        run: |
+          # Get list of changed Python files in this PR
+          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.py' | tr '\n' ' ')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "Changed files: $FILES"
+      
+      - name: Run code review
+        if: steps.changed-files.outputs.files != ''
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Option A: Personal Access Token
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Option B: GitHub App (uncomment these and comment out GITHUB_TOKEN above)
+          # GITHUB_APP_ID: ${{ secrets.GITHUB_APP_ID }}
+          # GITHUB_APP_PRIVATE_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+          # GITHUB_APP_INSTALLATION_ID: ${{ secrets.GITHUB_APP_INSTALLATION_ID }}
+        run: |
+          # Review only the changed files
+          python code_reviewer.py ${{ steps.changed-files.outputs.files }} \
+            --github ${{ github.repository }} \
+            --pr ${{ github.event.pull_request.number }} \
+            --verbose
+      
+      - name: No Python files changed
+        if: steps.changed-files.outputs.files == ''
+        run: echo "No Python files changed in this PR, skipping review."
