@@ -4,14 +4,14 @@ PR Monitor Daemon for Code Review Agent
 Watches a GitHub repository for new PRs and automatically reviews them.
 
 Usage:
-    # Monitor a single repo
+    # Monitor with bot mode (fast)
     python pr_monitor.py --repo owner/repo
     
-    # Monitor with custom interval
-    python pr_monitor.py --repo owner/repo --interval 60
+    # Monitor with agent mode (thorough)
+    python pr_monitor.py --repo owner/repo --agent
     
     # Monitor multiple repos
-    python pr_monitor.py --repo owner/repo1 --repo owner/repo2
+    python pr_monitor.py --repo owner/repo1 --repo owner/repo2 --agent
     
     # Run once (for cron jobs)
     python pr_monitor.py --repo owner/repo --once
@@ -78,14 +78,16 @@ class ReviewState:
         return self.reviewed[key].get("head_sha") == head_sha
     
     def mark_reviewed(self, repo: str, pr_number: int, head_sha: str, 
-                      success: bool = True, error: Optional[str] = None):
+                      success: bool = True, error: Optional[str] = None,
+                      mode: str = "bot"):
         """Mark a PR as reviewed."""
         key = self.get_key(repo, pr_number)
         self.reviewed[key] = {
             "head_sha": head_sha,
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
             "success": success,
-            "error": error
+            "error": error,
+            "mode": mode
         }
         self._save()
     
@@ -100,77 +102,92 @@ class ReviewState:
         self._save()
 
 
-def review_pr(repo: str, pr_number: int, verbose: bool = False) -> dict:
+def review_pr_bot(repo: str, pr_number: int, verbose: bool = False) -> dict:
     """
-    Review a single PR by fetching its code from GitHub.
-    
-    Returns:
-        dict with 'success', 'findings_count', 'error' keys
+    Review a PR using bot mode (fast, linear).
     """
-    # Import here to avoid circular imports
-    from code_reviewer import review_with_claude, load_rules, ReviewResult
+    from code_reviewer import review_with_claude, load_rules
     from github_integration import post_review_to_github
     
     try:
         config = get_github_config(repo, pr_number)
         client = GitHubClient(config)
         
-        # Get PR info
         pr_info = client.get_pr_info()
         if verbose:
             print(f"  PR #{pr_number}: {pr_info['title']}")
-            print(f"  Author: {pr_info['user']['login']}")
-            print(f"  Head: {pr_info['head']['sha'][:8]}")
         
-        # Fetch changed files
         files = client.get_pr_file_contents(python_only=True)
         
         if not files:
             if verbose:
-                print("  No Python files changed, skipping review.")
+                print("  No Python files changed, skipping.")
             return {"success": True, "findings_count": 0, "skipped": True}
         
-        if verbose:
-            print(f"  Found {len(files)} Python file(s) to review")
-        
-        # Load rules
         rules = load_rules()
-        
-        # Review each file
         all_results = []
+        
         for file_info in files:
             if verbose:
                 print(f"    Reviewing: {file_info['filename']}")
-            
-            result = review_with_claude(
-                code=file_info["content"],
-                rules=rules,
-                filename=file_info["filename"]
-            )
+            result = review_with_claude(file_info["content"], rules, file_info["filename"])
             all_results.append(result)
         
-        # Post review to GitHub
         post_result = post_review_to_github(all_results, config, inline_comments=True)
-        
         total_findings = sum(len(r.findings) for r in all_results)
-        
-        if verbose:
-            print(f"  ✓ Review posted: {total_findings} findings")
         
         return {
             "success": True,
             "findings_count": total_findings,
-            "inline_comments": post_result.get("inline_comments", 0)
+            "inline_comments": post_result.get("inline_comments", 0),
+            "mode": "bot"
         }
         
     except Exception as e:
-        error_msg = str(e)
+        return {"success": False, "error": str(e)}
+
+
+def review_pr_agent(repo: str, pr_number: int, verbose: bool = False) -> dict:
+    """
+    Review a PR using agent mode (thorough, reasoning).
+    """
+    try:
+        from agent_reviewer import run_agent
+        from github_integration import GitHubClient, get_github_config
+        
+        config = get_github_config(repo, pr_number)
+        client = GitHubClient(config)
+        
+        pr_info = client.get_pr_info()
         if verbose:
-            print(f"  ✗ Error: {error_msg}")
-        return {"success": False, "error": error_msg}
+            print(f"  PR #{pr_number}: {pr_info['title']}")
+            print(f"  🤖 Running agent mode...")
+        
+        state = run_agent(client, verbose=verbose)
+        
+        return {
+            "success": state.review_posted,
+            "findings_count": len(state.findings),
+            "iterations": state.iteration,
+            "mode": "agent"
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
-def check_repo_for_prs(repo: str, state: ReviewState, verbose: bool = False) -> int:
+def review_pr(repo: str, pr_number: int, use_agent: bool = False, verbose: bool = False) -> dict:
+    """
+    Review a single PR.
+    """
+    if use_agent:
+        return review_pr_agent(repo, pr_number, verbose)
+    else:
+        return review_pr_bot(repo, pr_number, verbose)
+
+
+def check_repo_for_prs(repo: str, state: ReviewState, use_agent: bool = False, 
+                       verbose: bool = False) -> int:
     """
     Check a repository for open PRs and review any new ones.
     
@@ -180,15 +197,14 @@ def check_repo_for_prs(repo: str, state: ReviewState, verbose: bool = False) -> 
     owner, repo_name = parse_github_repo(repo)
     
     try:
-        # Create a config just to get the token (PR number doesn't matter here)
         config = get_github_config(repo, 1)
         client = GitHubClient(config)
         
-        # Get open PRs
         prs = client.get_open_prs()
         
+        mode_str = "🤖 agent" if use_agent else "⚡ bot"
         if verbose:
-            print(f"\n[{repo}] Found {len(prs)} open PR(s)")
+            print(f"\n[{repo}] Found {len(prs)} open PR(s) - using {mode_str} mode")
         
         reviewed_count = 0
         
@@ -197,7 +213,6 @@ def check_repo_for_prs(repo: str, state: ReviewState, verbose: bool = False) -> 
             head_sha = pr["head"]["sha"]
             title = pr["title"]
             
-            # Check if already reviewed at this commit
             if state.was_reviewed(repo, pr_number, head_sha):
                 if verbose:
                     print(f"  PR #{pr_number}: Already reviewed at {head_sha[:8]}, skipping")
@@ -205,21 +220,20 @@ def check_repo_for_prs(repo: str, state: ReviewState, verbose: bool = False) -> 
             
             print(f"\n[{repo}] Reviewing PR #{pr_number}: {title}")
             
-            # Update config with correct PR number
-            config = get_github_config(repo, pr_number)
+            result = review_pr(repo, pr_number, use_agent=use_agent, verbose=verbose)
             
-            # Review the PR
-            result = review_pr(repo, pr_number, verbose=verbose)
-            
-            # Mark as reviewed
             state.mark_reviewed(
                 repo, pr_number, head_sha,
                 success=result.get("success", False),
-                error=result.get("error")
+                error=result.get("error"),
+                mode="agent" if use_agent else "bot"
             )
             
             if result.get("success") and not result.get("skipped"):
                 reviewed_count += 1
+                print(f"  ✓ Review posted ({result.get('findings_count', 0)} findings)")
+            elif result.get("error"):
+                print(f"  ✗ Error: {result.get('error')}")
         
         return reviewed_count
         
@@ -229,20 +243,15 @@ def check_repo_for_prs(repo: str, state: ReviewState, verbose: bool = False) -> 
 
 
 def run_monitor(repos: list[str], interval: int = 300, once: bool = False, 
-                verbose: bool = False):
+                use_agent: bool = False, verbose: bool = False):
     """
     Main monitoring loop.
-    
-    Args:
-        repos: List of repositories to monitor (owner/repo format)
-        interval: Seconds between checks
-        once: If True, run once and exit (for cron)
-        verbose: Show detailed output
     """
     state = ReviewState()
+    mode_str = "🤖 Agent" if use_agent else "⚡ Bot"
     
     print("=" * 60)
-    print("Code Review Agent - PR Monitor")
+    print(f"Code Review Agent - PR Monitor ({mode_str} Mode)")
     print("=" * 60)
     print(f"Monitoring {len(repos)} repo(s): {', '.join(repos)}")
     print(f"Check interval: {interval} seconds")
@@ -250,16 +259,14 @@ def run_monitor(repos: list[str], interval: int = 300, once: bool = False,
     print("=" * 60)
     
     if once:
-        # Single run mode
         total_reviewed = 0
         for repo in repos:
-            total_reviewed += check_repo_for_prs(repo, state, verbose=verbose)
+            total_reviewed += check_repo_for_prs(repo, state, use_agent=use_agent, verbose=verbose)
         
         print(f"\n{'=' * 60}")
         print(f"Reviewed {total_reviewed} PR(s)")
         return
     
-    # Continuous monitoring mode
     print("\nStarting monitor... (Press Ctrl+C to stop)\n")
     
     try:
@@ -269,7 +276,7 @@ def run_monitor(repos: list[str], interval: int = 300, once: bool = False,
             
             total_reviewed = 0
             for repo in repos:
-                total_reviewed += check_repo_for_prs(repo, state, verbose=verbose)
+                total_reviewed += check_repo_for_prs(repo, state, use_agent=use_agent, verbose=verbose)
             
             if total_reviewed > 0:
                 print(f"\nReviewed {total_reviewed} PR(s) this cycle")
@@ -287,19 +294,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Monitor a single repo
+    # Monitor with fast bot mode
     python pr_monitor.py --repo owner/repo
     
-    # Monitor multiple repos with verbose output
-    python pr_monitor.py --repo owner/repo1 --repo owner/repo2 -v
+    # Monitor with thorough agent mode
+    python pr_monitor.py --repo owner/repo --agent
     
-    # Check once and exit (for cron jobs)
-    python pr_monitor.py --repo owner/repo --once
+    # Monitor multiple repos with agent
+    python pr_monitor.py --repo owner/repo1 --repo owner/repo2 --agent -v
     
-    # Custom check interval (2 minutes)
+    # Check once and exit (for cron)
+    python pr_monitor.py --repo owner/repo --agent --once
+    
+    # Custom interval (2 minutes)
     python pr_monitor.py --repo owner/repo --interval 120
     
-    # Clear review history and re-review all PRs
+    # Clear history and re-review all
     python pr_monitor.py --repo owner/repo --clear-state
         """
     )
@@ -311,6 +321,8 @@ Examples:
                         help="Seconds between PR checks (default: 300)")
     parser.add_argument("--once", action="store_true",
                         help="Run once and exit (for cron jobs)")
+    parser.add_argument("--agent", "-a", action="store_true",
+                        help="Use agent mode for thorough, reasoning-based reviews")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show detailed output")
     parser.add_argument("--clear-state", action="store_true",
@@ -350,6 +362,7 @@ Examples:
         repos=args.repo,
         interval=args.interval,
         once=args.once,
+        use_agent=args.agent,
         verbose=args.verbose
     )
 
