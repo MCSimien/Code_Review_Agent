@@ -23,15 +23,42 @@ python code_reviewer.py src/ --output json
 Post review comments directly to GitHub Pull Requests:
 
 ```bash
-# Basic PR review
-python code_reviewer.py src/ --github owner/repo --pr 123
+# Auto-fetch code from PR (no local files needed!)
+python code_reviewer.py --github owner/repo --pr 123
 
-# With inline comments on specific lines
-python code_reviewer.py . --github myorg/myrepo --pr 45
+# With local code (for testing before pushing)
+python code_reviewer.py src/ --github myorg/myrepo --pr 45
 
 # Summary only (no inline comments)
-python code_reviewer.py src/ --github owner/repo --pr 123 --no-inline
+python code_reviewer.py --github owner/repo --pr 123 --no-inline
 ```
+
+### Monitor for New PRs
+
+Automatically watch repositories and review new PRs as they're opened:
+
+```bash
+# Start the monitor daemon
+python pr_monitor.py --repo owner/repo
+
+# Monitor multiple repos
+python pr_monitor.py --repo owner/repo1 --repo owner/repo2
+
+# Custom check interval (2 minutes)
+python pr_monitor.py --repo owner/repo --interval 120
+
+# Run once and exit (for cron jobs)
+python pr_monitor.py --repo owner/repo --once
+
+# Verbose output
+python pr_monitor.py --repo owner/repo -v
+```
+
+The monitor:
+- Checks for open PRs at regular intervals
+- Tracks which PRs have been reviewed (stored in `~/.code_review_agent/reviewed_prs.json`)
+- Re-reviews PRs when new commits are pushed
+- Skips PRs with no Python files
 
 ### GitHub Setup
 

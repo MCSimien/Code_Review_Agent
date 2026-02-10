@@ -379,13 +379,19 @@ Examples:
     python code_reviewer.py src/ --rules my_rules.yaml
     python code_reviewer.py . --output json
     
-    # GitHub PR review
+    # GitHub PR review (auto-fetch code from PR)
+    python code_reviewer.py --github owner/repo --pr 123
+    
+    # GitHub PR review with local code
     python code_reviewer.py src/ --github owner/repo --pr 123
-    python code_reviewer.py . --github myorg/myrepo --pr 45 --no-inline
+    
+    # Monitor for new PRs (see pr_monitor.py)
+    python pr_monitor.py --repo owner/repo
         """
     )
     
-    parser.add_argument("path", help="File or directory to review")
+    parser.add_argument("path", nargs="?", default=None,
+                        help="File or directory to review (optional if using --github --pr)")
     parser.add_argument("--rules", "-r", help="Path to rules YAML file")
     parser.add_argument("--output", "-o", choices=["text", "json"], default="text",
                         help="Output format (default: text)")
@@ -397,7 +403,7 @@ Examples:
     github_group.add_argument("--github", metavar="OWNER/REPO",
                               help="GitHub repository (e.g., 'octocat/hello-world')")
     github_group.add_argument("--pr", type=int, metavar="NUMBER",
-                              help="Pull request number to comment on")
+                              help="Pull request number to review")
     github_group.add_argument("--github-token", 
                               help="GitHub token (or set GITHUB_TOKEN env var)")
     github_group.add_argument("--no-inline", action="store_true",
@@ -405,14 +411,20 @@ Examples:
     
     args = parser.parse_args()
     
-    # Validate GitHub args
+    # Validate arguments
     if args.github and not args.pr:
         parser.error("--github requires --pr")
     if args.pr and not args.github:
         parser.error("--pr requires --github")
     
-    # Validate path exists
-    if not os.path.exists(args.path):
+    # Determine if we're fetching from GitHub or using local files
+    fetch_from_github = args.github and args.pr and not args.path
+    
+    if not args.path and not fetch_from_github:
+        parser.error("Either provide a path or use --github and --pr to fetch from GitHub")
+    
+    # Validate local path if provided
+    if args.path and not os.path.exists(args.path):
         print(f"Error: Path '{args.path}' does not exist")
         sys.exit(1)
     
@@ -421,34 +433,85 @@ Examples:
     if args.verbose:
         print(f"Loaded rules: {list(rules.keys())}")
     
-    # Find files to review
-    files = find_python_files(args.path)
-    if not files:
-        print(f"No Python files found in '{args.path}'")
-        sys.exit(0)
-    
-    if args.verbose:
-        print(f"Found {len(files)} file(s) to review")
-    
-    # Review each file
+    # Collect files to review
     all_results = []
-    for filepath in files:
-        if args.verbose:
-            print(f"Reviewing: {filepath}")
-        
+    
+    if fetch_from_github:
+        # Fetch files directly from the PR
         try:
-            code = get_file_content(filepath)
-            result = review_with_claude(code, rules, filepath)
-            all_results.append(result)
+            from github_integration import get_github_config, GitHubClient, post_review_to_github
             
-            # Output results (unless we're posting to GitHub, then be quieter)
-            if not args.github:
-                print(format_findings(result, args.output))
-            elif args.verbose:
-                print(format_findings(result, "text"))
+            print(f"Fetching PR #{args.pr} from {args.github}...")
             
+            config = get_github_config(args.github, args.pr, args.github_token)
+            client = GitHubClient(config)
+            
+            # Get PR info
+            pr_info = client.get_pr_info()
+            print(f"PR: {pr_info['title']}")
+            print(f"Author: {pr_info['user']['login']}")
+            print(f"Branch: {pr_info['head']['ref']} -> {pr_info['base']['ref']}")
+            
+            # Fetch file contents
+            files = client.get_pr_file_contents(python_only=True)
+            
+            if not files:
+                print("No Python files changed in this PR")
+                sys.exit(0)
+            
+            print(f"Found {len(files)} Python file(s) to review\n")
+            
+            # Review each file
+            for file_info in files:
+                filename = file_info["filename"]
+                if args.verbose:
+                    print(f"Reviewing: {filename}")
+                
+                try:
+                    result = review_with_claude(file_info["content"], rules, filename)
+                    all_results.append(result)
+                    
+                    if args.verbose:
+                        print(format_findings(result, "text"))
+                        
+                except Exception as e:
+                    print(f"Error reviewing {filename}: {e}")
+            
+        except ImportError:
+            print("Error: github_integration.py not found")
+            sys.exit(1)
         except Exception as e:
-            print(f"Error reviewing {filepath}: {e}")
+            print(f"Error fetching from GitHub: {e}")
+            sys.exit(1)
+    
+    else:
+        # Use local files
+        files = find_python_files(args.path)
+        if not files:
+            print(f"No Python files found in '{args.path}'")
+            sys.exit(0)
+        
+        if args.verbose:
+            print(f"Found {len(files)} file(s) to review")
+        
+        # Review each file
+        for filepath in files:
+            if args.verbose:
+                print(f"Reviewing: {filepath}")
+            
+            try:
+                code = get_file_content(filepath)
+                result = review_with_claude(code, rules, filepath)
+                all_results.append(result)
+                
+                # Output results (unless we're posting to GitHub, then be quieter)
+                if not args.github:
+                    print(format_findings(result, args.output))
+                elif args.verbose:
+                    print(format_findings(result, "text"))
+                
+            except Exception as e:
+                print(f"Error reviewing {filepath}: {e}")
     
     # Summary
     total_findings = sum(len(r.findings) for r in all_results)

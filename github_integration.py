@@ -220,6 +220,84 @@ class GitHubClient:
                 positions[filename][current_line] = diff_position
         
         return positions
+    
+    def get_file_content(self, path: str, ref: str) -> str:
+        """
+        Fetch the content of a file at a specific ref (branch/commit).
+        
+        Args:
+            path: File path in the repo
+            ref: Git ref (branch name, commit SHA, etc.)
+        """
+        url = f"{self.config.api_base}/contents/{path}?ref={ref}"
+        
+        request = urllib.request.Request(url, headers=self.headers, method="GET")
+        
+        try:
+            with urllib.request.urlopen(request) as response:
+                data = json.loads(response.read().decode())
+                
+                # Content is base64 encoded
+                if data.get("encoding") == "base64":
+                    content = base64.b64decode(data["content"]).decode("utf-8")
+                    return content
+                else:
+                    raise RuntimeError(f"Unexpected encoding: {data.get('encoding')}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise FileNotFoundError(f"File not found: {path} at ref {ref}")
+            error_body = e.read().decode()
+            raise RuntimeError(f"GitHub API error {e.code}: {error_body}")
+    
+    def get_pr_file_contents(self, python_only: bool = True) -> list[dict]:
+        """
+        Fetch the content of all files changed in the PR.
+        
+        Args:
+            python_only: If True, only fetch Python files
+            
+        Returns:
+            List of dicts with 'filename' and 'content' keys
+        """
+        pr_info = self.get_pr_info()
+        head_ref = pr_info["head"]["sha"]  # Use commit SHA for accuracy
+        
+        files = self.get_pr_files()
+        results = []
+        
+        for file_info in files:
+            filename = file_info["filename"]
+            status = file_info["status"]
+            
+            # Skip deleted files
+            if status == "removed":
+                continue
+            
+            # Filter for Python files if requested
+            if python_only and not filename.endswith(".py"):
+                continue
+            
+            try:
+                content = self.get_file_content(filename, head_ref)
+                results.append({
+                    "filename": filename,
+                    "content": content,
+                    "status": status,
+                    "additions": file_info.get("additions", 0),
+                    "deletions": file_info.get("deletions", 0),
+                })
+            except FileNotFoundError:
+                # File might be binary or inaccessible
+                continue
+            except Exception as e:
+                print(f"Warning: Could not fetch {filename}: {e}")
+                continue
+        
+        return results
+    
+    def get_open_prs(self, state: str = "open") -> list[dict]:
+        """Get list of pull requests."""
+        return self._request("GET", f"/pulls?state={state}&sort=updated&direction=desc")
 
 
 def format_review_body(results: list, summary_only: bool = False) -> str:
